@@ -1,1 +1,71 @@
+name: Deploy to EC2
 
+on:
+  push:
+    branches:
+      - main
+
+env:
+  EC2_PUBLIC_IP: ${{ secrets.EC2_PUBLIC_IP }}
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+
+jobs:
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout the app code
+      uses: actions/checkout@v2
+
+    - name: Set up Python environment & check app.py running
+      run: |
+        python -m pip install --upgrade pip
+        pip install flask
+        # Run app.py in the background and wait for it to start
+        nohup python app.py &
+        sleep 2
+
+    - name: Build Docker image
+      run: |
+        IMAGE_TAG="${{ github.sha }}"
+        docker build -t $DOCKER_USERNAME/netflix-backend:$IMAGE_TAG .
+
+    - name: Login to Docker Hub
+      run: |
+        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+    - name: Push Docker image to Docker Hub
+      run: |
+        IMAGE_TAG="${{ github.sha }}"
+        docker push $DOCKER_USERNAME/netflix-backend:$IMAGE_TAG
+
+    - name: Copy SSH key to GitHub runner
+      run: |
+        echo "$SSH_PRIVATE_KEY" > mykey.pem
+        chmod 600 mykey.pem
+
+    - name: Deploy Docker image on EC2
+      run: |
+        # Define the IMAGE_TAG in GitHub Actions runner
+        IMAGE_TAG="${{ github.sha }}"
+
+        # SSH into EC2 and run commands
+        ssh -o StrictHostKeyChecking=no -i mykey.pem admin@$EC2_PUBLIC_IP << EOF
+          # Set the image tag inside the EC2 instance
+          IMAGE_TAG=$IMAGE_TAG
+
+          # Stop and remove the existing container if it exists
+          if sudo docker ps -a --format '{{.Names}}' | grep -Eq "^netflix-backend\$"; then
+            sudo docker stop netflix-backend || true
+            sudo docker rm netflix-backend || true
+          fi
+
+          # Pull the latest Docker image from Docker Hub
+          sudo docker pull $DOCKER_USERNAME/netflix-backend:\$IMAGE_TAG
+
+          # Run a new container with the pulled image
+          sudo docker run -d --name netflix-backend -p 8080:8080 $DOCKER_USERNAME/netflix-backend:\$IMAGE_TAG
+        EOF
